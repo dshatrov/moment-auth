@@ -46,7 +46,6 @@ private:
                                    bool         successful_request);
 
   mt_iface (MomentServer::AuthBackend)
-
     static MomentServer::AuthBackend const auth_backend;
 
     static Ref<MomentServer::AuthSession> newAuthSession (void *_self);
@@ -70,18 +69,15 @@ private:
     static void authSessionDisconnected (MomentServer::AuthSession *_auth_session,
                                          ConstMemory                auth_key,
                                          void                      *_self);
-
   mt_iface_end
 
   mt_iface (HttpClient::HttpResponseHandler)
-
     static HttpClient::HttpResponseHandler const auth_response_handler;
 
-    static Result authHttpResponse (HttpRequest   *resp,
-                                    Memory const  &msg_body,
-                                    void         ** mt_nonnull /* ret_msg_data */,
-                                    void          *_data);
-
+    static Result authHttpResponse (HttpRequest  *resp,
+                                    Memory        msg_body,
+                                    void        ** mt_nonnull /* ret_msg_data */,
+                                    void         *_data);
   mt_iface_end
 
 public:
@@ -103,10 +99,10 @@ public:
 static MomentAuthModule *moment_auth;
 
 
-static Result disconnectedHttpResponse (HttpRequest   * const resp,
-                                        Memory const  & /* msg_body */,
-                                        void         ** const mt_nonnull /* ret_msg_data */,
-                                        void          * const /* cb_data */)
+static Result disconnectedHttpResponse (HttpRequest  * const resp,
+                                        Memory         const /* msg_body */,
+                                        void        ** const mt_nonnull /* ret_msg_data */,
+                                        void         * const /* cb_data */)
 {
     if (!resp)
         logE_ (_func, "request error");
@@ -129,13 +125,15 @@ MomentAuthModule::sendDisconnected (ConstMemory const auth_key)
             makeString ("/", disconnected_req->mem(), (disconnected_req_has_params ? "&" : "?"),
                         "host=", this_host->mem(),
                         "&auth=", auth_key);
+    logD_ (_func, "req_str: ", req_str);
 
     if (!http_client.httpGet (req_str->mem(),
                               CbDesc<HttpClient::HttpResponseHandler> (&disconnected_response_handler,
                                                                        NULL,
                                                                        NULL),
                               true  /* preassembly */,
-                              false /* parse_body_params */))
+                              false /* parse_body_params */,
+                              true  /* use_http_1_0 */ ))
     {
         logE_ (_func, "httpGet() failed");
     }
@@ -197,7 +195,7 @@ HttpClient::HttpResponseHandler const MomentAuthModule::auth_response_handler = 
 
 Result
 MomentAuthModule::authHttpResponse (HttpRequest   * const resp,
-                                    Memory const  &msg_body,
+                                    Memory          const msg_body,
                                     void         ** const mt_nonnull /* ret_msg_data */,
                                     void          * const _data)
 {
@@ -215,8 +213,12 @@ MomentAuthModule::authHttpResponse (HttpRequest   * const resp,
         return Result::Success;
     }
 
-//    logD_ (_func, "msg_body.len(): ", msg_body.len());
-//    hexdump (logs, msg_body);
+    if (logLevelOn_ (LogLevel::Debug)) {
+        logLock ();
+        logD_unlocked_ (_func, "length: ", msg_body.len());
+        hexdump (logs, msg_body);
+        logUnlock ();
+    }
 
     Size body_len = msg_body.len();
     while (body_len > 0) {
@@ -309,14 +311,16 @@ MomentAuthModule::checkAuthorization (MomentServer::AuthSession * const _auth_se
                           "&client=", IpAddress_NoPort (client_addr),
                           "&stream=", stream_name,
                           "&auth=", auth_key);
+    logD_ (_func, "req_str: ", req_str);
 
     if (!self->http_client.httpGet (req_str->mem(),
                                     CbDesc<HttpClient::HttpResponseHandler> (&auth_response_handler,
                                                                              data,
                                                                              NULL,
                                                                              data),
-                                    true /* preassembly */,
-                                    true /* parse_body_params */))
+                                    true  /* preassembly */,
+                                    false /* parse_body_params */,
+                                    true  /* use_http_1_0 */))
     {
         if (auth_session) {
             auth_session->mutex.lock ();
