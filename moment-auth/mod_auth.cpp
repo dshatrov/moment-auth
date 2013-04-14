@@ -30,6 +30,10 @@ private:
     mt_const bool watch_req_enabled;
     mt_const bool watch_req_has_params;
 
+    mt_const Ref<String> watch_restream_req;
+    mt_const bool watch_restream_req_enabled;
+    mt_const bool watch_restream_req_has_params;
+
     mt_const Ref<String> stream_req;
     mt_const bool stream_req_enabled;
     mt_const bool stream_req_has_params;
@@ -64,6 +68,7 @@ private:
                                     IpAddress                  client_addr,
                                     CbDesc<MomentServer::CheckAuthorizationCallback> const &cb,
                                     bool                      * mt_nonnull ret_authorized,
+                                    StRef<String>             * mt_nonnull ret_reply_str,
                                     void                      *_self);
 
     static void authSessionDisconnected (MomentServer::AuthSession *_auth_session,
@@ -87,6 +92,8 @@ public:
                         ConstMemory   this_host,
                         ConstMemory   watch_req,
                         bool          watch_req_enabled,
+                        ConstMemory   watch_restream_req,
+                        bool          watch_restream_req_enabled,
                         ConstMemory   stream_req,
                         bool          stream_req_enabled,
                         ConstMemory   disconnected_req,
@@ -180,7 +187,8 @@ MomentAuthModule::newAuthSession (void * const /* _self */)
 {
 //    MomentAuthModule * const self = static_cast <MomentAuthModule*> (_self);
 
-    AuthSession * const auth_session = new AuthSession;
+    AuthSession * const auth_session = new (std::nothrow) AuthSession;
+    assert (auth_session);
     auth_session->num_active_requests = 0;
     auth_session->num_complete_requests = 0;
     auth_session->disconnected = false;
@@ -209,7 +217,7 @@ MomentAuthModule::authHttpResponse (HttpRequest   * const resp,
             self->finishAuthSessionRequest (data->auth_session, false /* successful_request */);
 
         logE_ (_func, "request error");
-        data->cb.call_ (false /* authorized */);
+        data->cb.call_ (false /* authorized */, ConstMemory() /* reply_str */);
         return Result::Success;
     }
 
@@ -223,7 +231,9 @@ MomentAuthModule::authHttpResponse (HttpRequest   * const resp,
     Size body_len = msg_body.len();
     while (body_len > 0) {
         if (msg_body.mem() [body_len - 1] != '\r' &&
-            msg_body.mem() [body_len - 1] != '\n')
+            msg_body.mem() [body_len - 1] != '\n' &&
+            msg_body.mem() [body_len - 1] != ' '  &&
+            msg_body.mem() [body_len - 1] != '\t')
         {
             break;
         }
@@ -231,11 +241,25 @@ MomentAuthModule::authHttpResponse (HttpRequest   * const resp,
         --body_len;
     }
 
-    bool const authorized = equal ("OK", msg_body.region (0, body_len));
+    ConstMemory const ok_mem = "OK";
+    bool const authorized = (body_len >= ok_mem.len() && equal (ok_mem, msg_body.region (0, ok_mem.len())));
+
+    ConstMemory reply_str;
+    if (authorized) {
+       reply_str = msg_body.region (ok_mem.len(), body_len - ok_mem.len());
+        while (reply_str.mem() [0] == '\r' ||
+               reply_str.mem() [0] == '\n' ||
+               reply_str.mem() [0] == ' '  ||
+               reply_str.mem() [0] == '\t')
+        {
+            reply_str = reply_str.region (1);
+        }
+    }
+
     if (authorized)
-        data->cb.call_ (true /* authorized */);
+        data->cb.call_ (true /* authorized */, reply_str);
     else
-        data->cb.call_ (false /* authorized */);
+        data->cb.call_ (false /* authorized */, reply_str);
 
     if (self && data->auth_session)
         self->finishAuthSessionRequest (data->auth_session, authorized /* successful_request */);
@@ -251,12 +275,14 @@ MomentAuthModule::checkAuthorization (MomentServer::AuthSession * const _auth_se
                                       IpAddress                   const client_addr,
                                       CbDesc<MomentServer::CheckAuthorizationCallback> const &cb,
                                       bool                      * const mt_nonnull ret_authorized,
+                                      StRef<String>             * const mt_nonnull ret_reply_str,
                                       void                      * const _self)
 {
     AuthSession * const auth_session = static_cast <AuthSession*> (_auth_session);
     MomentAuthModule * const self = static_cast <MomentAuthModule*> (_self);
 
     *ret_authorized = false;
+    *ret_reply_str = NULL;
 
     logD_ (_func, "stream_name: ", stream_name, ", "
            "auth_key: ", auth_key, ", "
@@ -266,7 +292,7 @@ MomentAuthModule::checkAuthorization (MomentServer::AuthSession * const _auth_se
         auth_session->mutex.lock ();
 
         if (!auth_session->auth_key) {
-            auth_session->auth_key = grab (new String (auth_key));
+            auth_session->auth_key = grab (new (std::nothrow) String (auth_key));
         } else {
             if (!equal (auth_session->auth_key->mem(), auth_key))
                 logF_ (_func, "WARNING: Different auth keys used for the same AuthSession");
@@ -283,7 +309,7 @@ MomentAuthModule::checkAuthorization (MomentServer::AuthSession * const _auth_se
         auth_session->mutex.unlock ();
     }
 
-    Ref<CheckAuthorization_Data> const data = grab (new CheckAuthorization_Data);
+    Ref<CheckAuthorization_Data> const data = grab (new (std::nothrow) CheckAuthorization_Data);
     data->weak_moment_auth = self;
     data->auth_session = auth_session;
     data->cb = cb;
@@ -291,12 +317,22 @@ MomentAuthModule::checkAuthorization (MomentServer::AuthSession * const _auth_se
     Ref<String> req_str;
     switch (auth_action) {
         case MomentServer::AuthAction_Watch: {
-            if (self->watch_req_enabled)
-                req_str = makeString ("/", self->watch_req->mem(), (self->watch_req_has_params ? "&" : "?"));
+            if (self->watch_req_enabled) {
+                req_str = makeString ("/", self->watch_req->mem(),
+                                      (self->watch_req_has_params ? "&" : "?"));
+            }
+        } break;
+        case MomentServer::AuthAction_WatchRestream: {
+            if (self->watch_restream_req_enabled) {
+                req_str = makeString ("/", self->watch_restream_req->mem(),
+                                      (self->watch_restream_req_has_params ? "&" : "?"));
+            }
         } break;
         case MomentServer::AuthAction_Stream: {
-            if (self->stream_req_enabled)
-                req_str = makeString ("/", self->stream_req->mem(), (self->stream_req_has_params ? "&" : "?"));
+            if (self->stream_req_enabled) {
+                req_str = makeString ("/", self->stream_req->mem(),
+                                      (self->stream_req_has_params ? "&" : "?"));
+            }
         } break;
         default:
             unreachable ();
@@ -384,23 +420,29 @@ MomentAuthModule::init (MomentServer * const mt_nonnull moment,
                         ConstMemory    const this_host,
                         ConstMemory    const watch_req,
                         bool           const watch_req_enabled,
+                        ConstMemory    const watch_restream_req,
+                        bool           const watch_restream_req_enabled,
                         ConstMemory    const stream_req,
                         bool           const stream_req_enabled,
                         ConstMemory    const disconnected_req,
                         bool           const disconnected_req_enabled)
 {
     this->moment = moment;
-    this->this_host = grab (new String (this_host));
+    this->this_host = grab (new (std::nothrow) String (this_host));
 
-    this->watch_req = grab (new String (watch_req));
+    this->watch_req = grab (new (std::nothrow) String (watch_req));
     this->watch_req_enabled = watch_req_enabled;
     watch_req_has_params = (bool) strchr (this->watch_req->cstr(), '?');
 
-    this->stream_req = grab (new String (stream_req));
+    this->watch_restream_req = grab (new (std::nothrow) String (watch_restream_req));
+    this->watch_restream_req_enabled = watch_restream_req_enabled;
+    watch_restream_req_has_params = (bool) strchr (this->watch_restream_req->cstr(), '?');
+
+    this->stream_req = grab (new (std::nothrow) String (stream_req));
     this->stream_req_enabled = stream_req_enabled;
     stream_req_has_params = (bool) strchr (this->stream_req->cstr(), '?');
 
-    this->disconnected_req = grab (new String (disconnected_req));
+    this->disconnected_req = grab (new (std::nothrow) String (disconnected_req));
     this->disconnected_req_enabled = disconnected_req_enabled;
     disconnected_req_has_params = (bool) strchr (this->disconnected_req->cstr(), '?');
 
@@ -485,6 +527,17 @@ static void momentAuthInit ()
             logD_ (_func, "watch auth check is not enabled");
     }
 
+    ConstMemory watch_restream_req;
+    bool watch_restream_req_enabled = false;
+    {
+        ConstMemory const opt_name = "mod_auth/watch_restream_req";
+        watch_restream_req = config->getString (opt_name, &watch_restream_req_enabled);
+        logD_ (_func, opt_name, ": ", watch_restream_req);
+
+        if (!watch_restream_req_enabled)
+            logD_ (_func, "watch_restream auth check is not enabled");
+    }
+
     ConstMemory stream_req;
     bool stream_req_enabled = false;
     {
@@ -507,13 +560,16 @@ static void momentAuthInit ()
             logD_ (_func, "disconnect auth notification is not enabled");
     }
 
-    moment_auth = new MomentAuthModule;
+    moment_auth = new (std::nothrow) MomentAuthModule;
+    assert (moment_auth);
     moment_auth->init (moment,
                        auth_addr,
                        auth_host,
                        this_host,
                        watch_req,
                        watch_req_enabled,
+                       watch_restream_req,
+                       watch_restream_req_enabled,
                        stream_req,
                        stream_req_enabled,
                        disconnected_req,
