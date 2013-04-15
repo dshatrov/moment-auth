@@ -246,11 +246,13 @@ MomentAuthModule::authHttpResponse (HttpRequest   * const resp,
 
     ConstMemory reply_str;
     if (authorized) {
-       reply_str = msg_body.region (ok_mem.len(), body_len - ok_mem.len());
-        while (reply_str.mem() [0] == '\r' ||
-               reply_str.mem() [0] == '\n' ||
-               reply_str.mem() [0] == ' '  ||
-               reply_str.mem() [0] == '\t')
+        reply_str = msg_body.region (ok_mem.len(), body_len - ok_mem.len());
+        logD_ (_func, "reply_str: ", reply_str);
+        while (reply_str.len() &&
+                   (reply_str.mem() [0] == '\r' ||
+                    reply_str.mem() [0] == '\n' ||
+                    reply_str.mem() [0] == ' '  ||
+                    reply_str.mem() [0] == '\t'))
         {
             reply_str = reply_str.region (1);
         }
