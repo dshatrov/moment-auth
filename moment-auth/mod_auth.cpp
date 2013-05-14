@@ -16,6 +16,9 @@ private:
         Mutex mutex;
 
         mt_mutex (mutex) Ref<String> auth_key;
+        mt_mutex (mutex) Ref<String> stream_name;
+        mt_mutex (mutex) IpAddress   client_addr;
+
         mt_mutex (mutex) Uint64 num_active_requests;
         mt_mutex (mutex) Uint64 num_complete_requests;
         mt_mutex (mutex) bool disconnected;
@@ -44,7 +47,9 @@ private:
 
     HttpClient http_client;
 
-    void sendDisconnected (ConstMemory auth_key);
+    void sendDisconnected (ConstMemory auth_key,
+                           IpAddress   client_addr,
+                           ConstMemory stream_name);
 
     void finishAuthSessionRequest (AuthSession * mt_nonnull auth_session,
                                    bool         successful_request);
@@ -73,6 +78,8 @@ private:
 
     static void authSessionDisconnected (MomentServer::AuthSession *_auth_session,
                                          ConstMemory                auth_key,
+                                         IpAddress                  client_addr,
+                                         ConstMemory                stream_name,
                                          void                      *_self);
   mt_iface_end
 
@@ -123,15 +130,19 @@ static HttpClient::HttpResponseHandler const disconnected_response_handler = {
 };
 
 void
-MomentAuthModule::sendDisconnected (ConstMemory const auth_key)
+MomentAuthModule::sendDisconnected (ConstMemory const auth_key,
+                                    IpAddress   const client_addr,
+                                    ConstMemory const stream_name)
 {
     if (!disconnected_req_enabled)
         return;
 
     Ref<String> const req_str =
             makeString ("/", disconnected_req->mem(), (disconnected_req_has_params ? "&" : "?"),
-                        "host=", this_host->mem(),
-                        "&auth=", auth_key);
+                        "host=",    this_host->mem(),
+                        "&client=", IpAddress_NoPort (client_addr),
+                        "&stream=", stream_name,
+                        "&auth=",   auth_key);
     logD_ (_func, "req_str: ", req_str);
 
     if (!http_client.httpGet (req_str->mem(),
@@ -152,6 +163,8 @@ MomentAuthModule::finishAuthSessionRequest (AuthSession * const mt_nonnull auth_
 {
     bool send_disconnected = false;
     Ref<String> auth_key;
+    Ref<String> stream_name;
+    IpAddress   client_addr;
     {
         auth_session->mutex.lock ();
 
@@ -167,13 +180,18 @@ MomentAuthModule::finishAuthSessionRequest (AuthSession * const mt_nonnull auth_
         {
             auth_session->disconnected_sent = true;
             send_disconnected = true;
-            auth_key = auth_session->auth_key;
+            auth_key    = auth_session->auth_key;
+            stream_name = auth_session->stream_name;
+            client_addr = auth_session->client_addr;
         }
         auth_session->mutex.unlock ();
     }
 
-    if (send_disconnected)
-        sendDisconnected (auth_key->mem());
+    if (send_disconnected) {
+        sendDisconnected (auth_key ? auth_key->mem() : ConstMemory(),
+                          client_addr,
+                          stream_name ? stream_name->mem() : ConstMemory());
+    }
 }
 
 MomentServer::AuthBackend const MomentAuthModule::auth_backend = {
@@ -300,6 +318,9 @@ MomentAuthModule::checkAuthorization (MomentServer::AuthSession * const _auth_se
                 logF_ (_func, "WARNING: Different auth keys used for the same AuthSession");
         }
 
+        auth_session->stream_name = grab (new (std::nothrow) String (stream_name));
+        auth_session->client_addr = client_addr;
+
         if (auth_session->disconnected) {
             auth_session->mutex.unlock ();
             logF_ (_func, "WARNING: Auth check for a disconnected auth session");
@@ -345,10 +366,10 @@ MomentAuthModule::checkAuthorization (MomentServer::AuthSession * const _auth_se
     }
 
     req_str = makeString (req_str->mem(),
-                          "host=", self->this_host->mem(),
+                          "host=",    self->this_host->mem(),
                           "&client=", IpAddress_NoPort (client_addr),
                           "&stream=", stream_name,
-                          "&auth=", auth_key);
+                          "&auth=",   auth_key);
     logD_ (_func, "req_str: ", req_str);
 
     if (!self->http_client.httpGet (req_str->mem(),
@@ -377,6 +398,8 @@ MomentAuthModule::checkAuthorization (MomentServer::AuthSession * const _auth_se
 void
 MomentAuthModule::authSessionDisconnected (MomentServer::AuthSession * const _auth_session,
                                            ConstMemory                 const auth_key,
+                                           IpAddress                   const client_addr,
+                                           ConstMemory                 const stream_name,
                                            void                      * const _self)
 {
     AuthSession * const auth_session = static_cast <AuthSession*> (_auth_session);
@@ -412,7 +435,7 @@ MomentAuthModule::authSessionDisconnected (MomentServer::AuthSession * const _au
         auth_session->mutex.unlock ();
     }
 
-    self->sendDisconnected (auth_key);
+    self->sendDisconnected (auth_key, client_addr, stream_name);
 }
 
 mt_const void
